@@ -391,6 +391,7 @@ func TestFunctions(t *testing.T) {
 }
 
 func TestFunctions2(t *testing.T) {
+	// TODO: add b64encode and b64decode
 	_e := valueNode(nil, "", Numeric, "foo")
 	_s := valueNode(nil, "", String, true)
 	tests := []struct {
@@ -444,6 +445,15 @@ func TestFunctions2(t *testing.T) {
 			"e": NumericNode("", 3),
 		}), result: NumericNode("", 2)},
 		{name: "avg array blank", fname: "avg", value: ArrayNode("test", []*Node{}), result: NumericNode("", 0)},
+		{name: "b64encode multiple of 4", fname: "b64encode", value: StringNode("", "I want that it wor"), result: StringNode("", "SSB3YW50IHRoYXQgaXQgd29y")},
+		{name: "b64encode remainder 1", fname: "b64encode", value: StringNode("", "I want that it work"), result: StringNode("", "SSB3YW50IHRoYXQgaXQgd29yaw==")},
+		{name: "b64encode remainder 2", fname: "b64encode", value: StringNode("", "I want that it works"), result: StringNode("", "SSB3YW50IHRoYXQgaXQgd29ya3M=")},
+		{name: "b64encode remainder 3", fname: "b64encode", value: StringNode("", "I want that it works!"), result: StringNode("", "SSB3YW50IHRoYXQgaXQgd29ya3Mh")},
+
+		{name: "b64decode multiple of 4", fname: "b64decode", value: StringNode("", "SSB3YW50IHRoYXQgaXQgd29y"), result: StringNode("", "I want that it wor")},
+		{name: "b64decode remainder 1", fname: "b64decode", value: StringNode("", "SSB3YW50IHRoYXQgaXQgd29yaw=="), result: StringNode("", "I want that it work")},
+		{name: "b64decode remainder 2", fname: "b64decode", value: StringNode("", "SSB3YW50IHRoYXQgaXQgd29ya3M="), result: StringNode("", "I want that it works")},
+		{name: "b64decode remainder 3", fname: "b64decode", value: StringNode("", "SSB3YW50IHRoYXQgaXQgd29ya3Mh"), result: StringNode("", "I want that it works!")},
 
 		{name: "sum error 1", fname: "sum", value: ArrayNode("test", []*Node{
 			valueNode(nil, "", Numeric, "foo"),

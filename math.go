@@ -1,10 +1,13 @@
 package ajson
 
 import (
+	"encoding/binary"
+	"errors"
 	"math"
 	"math/rand"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -378,6 +381,143 @@ var (
 			}
 			return valueNode(nil, "avg", Null, nil), nil
 		},
+		/*
+		 b64encode implementation is derived from the encoding/base64 Encode method.
+		 The implementation can be found here:
+		 https://cs.opensource.google/go/go/+/refs/tags/go1.19.2:src/encoding/base64/base64.go;l=140;drc=49abdbccde5de042997d6aabe7819212b88f2ef5
+		*/
+		"b64encode": func(node *Node) (result *Node, err error) {
+			if node.IsString() {
+				if _, err := node.GetString(); err != nil {
+					return nil, err
+				} else {
+					encode := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+					sourceString, _ := node.GetString()
+					sourceBytes := []byte(sourceString)
+					if len(sourceBytes) == 0 {
+						return nil, errors.New("String is empty")
+					}
+
+					di, si := 0, 0
+					n := (len(sourceBytes) / 3) * 3
+					remain := len(sourceBytes) % 3
+					padding := 0
+					if remain != 0 {
+						padding = 4
+					}
+					result := make([]byte, n/3*4+padding)
+					for si < n {
+						// Convert 3x 8bit source bytes into 4 bytes
+						val := uint(sourceBytes[si+0])<<16 | uint(sourceBytes[si+1])<<8 | uint(sourceBytes[si+2])
+
+						result[di+0] = encode[val>>18&0x3F]
+						result[di+1] = encode[val>>12&0x3F]
+						result[di+2] = encode[val>>6&0x3F]
+						result[di+3] = encode[val&0x3F]
+
+						si += 3
+						di += 4
+					}
+					if remain == 0 {
+						return valueNode(nil, "base64_encode", String, string(result)), nil
+					}
+					// Add the remaining small block
+					val := uint(sourceBytes[si+0]) << 16
+					if remain == 2 {
+						val |= uint(sourceBytes[si+1]) << 8
+					}
+
+					result[di+0] = encode[val>>18&0x3F]
+					result[di+1] = encode[val>>12&0x3F]
+
+					switch remain {
+					case 2:
+						result[di+2] = encode[val>>6&0x3F]
+						result[di+3] = '='
+
+					case 1:
+						result[di+2] = byte('=')
+						result[di+3] = byte('=')
+
+					}
+					return valueNode(nil, "base64_encode", String, string(result)), nil
+				}
+			}
+			return valueNode(nil, "base64_encode", Null, nil), nil
+		},
+		"b64decode": func(node *Node) (result *Node, err error) {
+			if node.IsString() {
+				if _, err := node.GetString(); err != nil {
+					return nil, err
+				} else {
+					n := 0
+					sourceString, _ := node.GetString()
+					sourceBytes := []byte(sourceString)
+					result := make([]byte, len(sourceBytes)/4*3)
+					decodeMap := getDecodeMap()
+
+					si := 0
+					for strconv.IntSize >= 64 && len(sourceBytes)-si >= 8 && len(result)-n >= 8 {
+						src2 := sourceBytes[si : si+8]
+						if dn, ok := assemble64(
+							decodeMap[src2[0]],
+							decodeMap[src2[1]],
+							decodeMap[src2[2]],
+							decodeMap[src2[3]],
+							decodeMap[src2[4]],
+							decodeMap[src2[5]],
+							decodeMap[src2[6]],
+							decodeMap[src2[7]],
+						); ok {
+							binary.BigEndian.PutUint64(result[n:], dn)
+							n += 6
+							si += 8
+						} else {
+							var ninc int
+							si, ninc, err = decodeQuantum(result[n:], sourceBytes, si)
+							n += ninc
+							if err != nil {
+								return nil, err
+							}
+						}
+					}
+
+					for len(sourceBytes)-si >= 4 && len(result)-n >= 4 {
+						src2 := sourceBytes[si : si+4]
+						if dn, ok := assemble32(
+							decodeMap[src2[0]],
+							decodeMap[src2[1]],
+							decodeMap[src2[2]],
+							decodeMap[src2[3]],
+						); ok {
+							binary.BigEndian.PutUint32(result[n:], dn)
+							n += 3
+							si += 4
+						} else {
+							var ninc int
+							si, ninc, err = decodeQuantum(result[n:], sourceBytes, si)
+							n += ninc
+							if err != nil {
+								return nil, err
+							}
+						}
+					}
+
+					for si < len(sourceBytes) {
+						var ninc int
+						si, ninc, err = decodeQuantum(result[n:], sourceBytes, si)
+						n += ninc
+						if err != nil {
+							return nil, err
+						}
+					}
+					return valueNode(nil, "base64_decode", String, string(result[:n])), nil
+				}
+				return valueNode(nil, "base64_encode", String, result), nil
+
+			}
+			return valueNode(nil, "base64_encode", Null, nil), nil
+		},
 		"sum": func(node *Node) (result *Node, err error) {
 			if node.isContainer() {
 				sum := float64(0)
@@ -491,4 +631,151 @@ func comparisonOperationsOrder() []string {
 		return len(result[i]) > len(result[j])
 	})
 	return result
+}
+
+func assemble32(n1, n2, n3, n4 byte) (dn uint32, ok bool) {
+	// Check that all the digits are valid. If any of them was 0xff, their
+	// bitwise OR will be 0xff.
+	if n1|n2|n3|n4 == 0xff {
+		return 0, false
+	}
+	return uint32(n1)<<26 |
+			uint32(n2)<<20 |
+			uint32(n3)<<14 |
+			uint32(n4)<<8,
+		true
+}
+func getDecodeMap() []byte {
+	encoder := []byte("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+	decodeMap := []byte(
+		"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff" +
+			"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff")
+
+	// ... TODO: implementation
+	for i := 0; i < 64; i++ {
+		decodeMap[encoder[i]] = byte(i)
+	}
+	return decodeMap
+}
+
+func decodeQuantum(dst, src []byte, si int) (nsi, n int, err error) {
+	// Decode quantum using the base64 alphabet
+	var dbuf [4]byte
+	dlen := 4
+	decodeMap := getDecodeMap()
+	// Lift the nil check outside of the loop.
+
+	for j := 0; j < len(dbuf); j++ {
+		if len(src) == si {
+			switch {
+			case j == 0:
+				return si, 0, nil
+			case j == 1:
+				return si, 0, errors.New("wrong")
+			}
+			dlen = j
+			break
+		}
+		in := src[si]
+		si++
+
+		out := decodeMap[in]
+		if out != 0xff {
+			dbuf[j] = out
+			continue
+		}
+
+		if in == '\n' || in == '\r' {
+			j--
+			continue
+		}
+
+		if rune(in) != '=' {
+			return si, 0, errors.New("Wrong")
+		}
+
+		// We've reached the end and there's padding
+		switch j {
+		case 0, 1:
+			// incorrect padding
+			return si, 0, errors.New("Wrong")
+		case 2:
+			// "==" is expected, the first "=" is already consumed.
+			// skip over newlines
+			for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+				si++
+			}
+			if si == len(src) {
+				// not enough padding
+				return si, 0, errors.New("Wrong")
+			}
+			if rune(src[si]) != '=' {
+				// incorrect padding
+				return si, 0, errors.New("Wrong")
+			}
+
+			si++
+		}
+
+		// skip over newlines
+		for si < len(src) && (src[si] == '\n' || src[si] == '\r') {
+			si++
+		}
+		if si < len(src) {
+			// trailing garbage
+			err = errors.New("Wrong")
+		}
+		dlen = j
+		break
+	}
+
+	// Convert 4x 6bit source bytes into 3 bytes
+	val := uint(dbuf[0])<<18 | uint(dbuf[1])<<12 | uint(dbuf[2])<<6 | uint(dbuf[3])
+	dbuf[2], dbuf[1], dbuf[0] = byte(val>>0), byte(val>>8), byte(val>>16)
+	switch dlen {
+	case 4:
+		dst[2] = dbuf[2]
+		dbuf[2] = 0
+		fallthrough
+	case 3:
+		dst[1] = dbuf[1]
+		dbuf[1] = 0
+		fallthrough
+	case 2:
+		dst[0] = dbuf[0]
+	}
+
+	return si, dlen - 1, err
+}
+
+func assemble64(n1, n2, n3, n4, n5, n6, n7, n8 byte) (dn uint64, ok bool) {
+	// Check that all the digits are valid. If any of them was 0xff, their
+	// bitwise OR will be 0xff.
+	if n1|n2|n3|n4|n5|n6|n7|n8 == 0xff {
+		return 0, false
+	}
+	return uint64(n1)<<58 |
+			uint64(n2)<<52 |
+			uint64(n3)<<46 |
+			uint64(n4)<<40 |
+			uint64(n5)<<34 |
+			uint64(n6)<<28 |
+			uint64(n7)<<22 |
+			uint64(n8)<<16,
+		true
 }
